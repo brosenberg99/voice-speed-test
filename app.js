@@ -153,6 +153,9 @@ const pocket = {
       this.worker.onerror = (e) => reject(new Error(e.message || "worker failed to start"));
       this.worker.postMessage({ type: "load" });
     });
+    // save the four sample voices too, so choosing one still works with Wi-Fi off
+    setStatus("Saving the sample voices…");
+    await Promise.all(["a2", "a5", "b2", "b4"].map((k) => fetch(`./voices/sample-${k}.wav`).then((r) => r.arrayBuffer())));
   },
   async setCustomVoice(samples24k, setStatus) {
     await new Promise((resolve, reject) => {
