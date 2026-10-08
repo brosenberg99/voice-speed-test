@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice speed test</title>
+<link rel="icon" href="data:,">
+<!-- Piper's library asks for "onnxruntime-web/wasm" by name; this tells the browser where to find it. -->
+<script type="importmap">
+{ "imports": { "onnxruntime-web/wasm": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.0/dist/ort.wasm.min.mjs" } }
+</script>
+<style>
+  :root { --bg:#fafaf7; --fg:#1d1d1b; --muted:#5d5d57; --line:#d8d6cc; --card:#fff; --accent:#1a5fb4; --ok:#1b6e3a; --bad:#a3261d; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#17171a; --fg:#ececea; --muted:#a4a4a0; --line:#34343a; --card:#212126; --accent:#7ab0ff; --ok:#6fd08f; --bad:#ff8f86; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:17px/1.5 system-ui, "Segoe UI", sans-serif; }
+  main { max-width: 920px; margin: 0 auto; padding: 20px 16px 80px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 20px; margin: 0 0 8px; }
+  p { margin: 6px 0; }
+  .muted { color: var(--muted); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin:16px 0; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; }
+  .grid .card { margin: 0; }
+  button { font:inherit; font-weight:600; padding:10px 16px; border-radius:8px; border:2px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; margin:4px 8px 4px 0; }
+  button.secondary { background:transparent; color:var(--accent); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible { outline:3px solid var(--accent); outline-offset:2px; }
+  select, input[type=text], textarea { font:inherit; padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--fg); max-width:100%; }
+  textarea { width:100%; min-height:130px; font:14px/1.4 ui-monospace, Consolas, monospace; }
+  table { border-collapse:collapse; width:100%; font-size:15px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; }
+  .status { margin:6px 0; min-height:1.5em; }
+  .ok { color:var(--ok); font-weight:600; } .bad { color:var(--bad); font-weight:600; }
+  .banner { border:2px solid var(--bad); border-radius:8px; padding:10px 14px; margin:12px 0; }
+  .banner.good { border-color:var(--ok); }
+  dl { display:grid; grid-template-columns: max-content 1fr; gap:2px 14px; margin:8px 0 0; font-size:15px; }
+  dt { color:var(--muted); } dd { margin:0; word-break:break-word; }
+  ol.sent { padding-left: 22px; margin: 6px 0; }
+  label { display:block; margin: 8px 0 2px; font-weight:600; }
+  .row { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+  .tiny { font-size:14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Voice speed test</h1>
+  <p class="muted">Tries three small voice makers on this device and times them. Nothing here changes Benny's Hub. Run it in Microsoft Edge.</p>
+
+  <div id="isolation" class="banner" hidden></div>
+
+  <section class="card" aria-labelledby="h-device">
+    <h2 id="h-device">This device</h2>
+    <dl id="device"></dl>
+  </section>
+
+  <section class="card" aria-labelledby="h-how">
+    <h2 id="h-how">How to use this page</h2>
+    <ol>
+      <li>Plugged in, on Wi-Fi: press <b>Download &amp; load</b> on each voice card. Note how long each takes.</li>
+      <li>Press <b>Run the 3 test sentences</b> on each card. Listen for gaps or stutters.</li>
+      <li>Turn Wi-Fi off, reload this page, and run them again (they should still work).</li>
+      <li>Unplug, then use <b>Repeat for 10 minutes</b> at the bottom.</li>
+      <li>Press <b>Copy results</b> and paste them into a message.</li>
+    </ol>
+    <p class="tiny muted">The three sentences: <span id="sentences"></span></p>
+  </section>
+
+  <div class="grid" id="engines"></div>
+
+  <section class="card" aria-labelledby="h-custom">
+    <h2 id="h-custom">Pocket TTS: custom voice</h2>
+    <p class="muted tiny">Pocket TTS can copy the sound of a short voice clip (up to 10 seconds). Four invented sample voices came with this page, or pick a clip of your own. Only use voices you have permission to copy.</p>
+    <div class="row">
+      <label class="row" style="margin:0">Sample voice
+        <select id="sample-voice" aria-label="Sample voice">
+          <option value="a2">Upbeat man 1 (A2)</option>
+          <option value="a5">Upbeat man 2 (A5)</option>
+          <option value="b2">Bright, boyish voice 1 (B2)</option>
+          <option value="b4">Bright, boyish voice 2 (B4)</option>
+        </select></label>
+      <button id="btn-sample-voice" class="secondary">Use this voice</button>
+      <label class="row" style="margin:0;font-weight:400">or a clip: <input type="file" id="voice-file" accept="audio/*"></label>
+    </div>
+    <div class="status" id="voice-status" aria-live="polite">Using a built-in voice.</div>
+  </section>
+
+  <section class="card" aria-labelledby="h-own">
+    <h2 id="h-own">Your own sentence</h2>
+    <div class="row">
+      <input type="text" id="own-text" size="48" value="Good morning! What game should we play today?" aria-label="Your own sentence">
+      <select id="own-engine" aria-label="Voice for your own sentence"></select>
+      <button id="btn-own">Speak it</button>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="h-loop">
+    <h2 id="h-loop">Repeat for 10 minutes</h2>
+    <p class="muted tiny">Speaks one sentence again and again to see battery use, heat, and whether it slows down. Unplug first. Note the battery % shown below when it starts and ends.</p>
+    <div class="row">
+      <select id="loop-engine" aria-label="Voice for the 10 minute run"></select>
+      <button id="btn-loop">Start</button>
+      <button id="btn-loop-stop" class="secondary" disabled>Stop</button>
+    </div>
+    <div class="status" id="loop-status" aria-live="polite"></div>
+  </section>
+
+  <section class="card" aria-labelledby="h-results">
+    <h2 id="h-results">Results</h2>
+    <p class="tiny muted">"First sound" is the wait between pressing the button and hearing the voice start (it starts once 0.3 seconds of speech is ready). Targets: short about 1 second or less, medium 1.5, long 2. No gaps.</p>
+    <div style="overflow-x:auto"><table id="results">
+      <thead><tr><th>Voice</th><th>Sentence</th><th>First sound (s)</th><th>Finished making (s)</th><th>Speech length (s)</th><th>Speed (&times; real time)</th><th>Gaps</th><th>Result</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <div class="row" style="margin-top:12px">
+      <button id="btn-copy">Copy results</button>
+      <button id="btn-clear" class="secondary">Clear saved downloads</button>
+    </div>
+    <label for="out">Everything to send back (select all and copy if the button does not work)</label>
+    <textarea id="out" readonly></textarea>
+  </section>
+
+  <section class="card tiny muted" aria-labelledby="h-credits">
+    <h2 id="h-credits">Credits</h2>
+    <p><a href="https://github.com/kyutai-labs/pocket-tts">Pocket TTS</a> by Kyutai (CC BY 4.0), run in the browser with code and ONNX files from <a href="https://huggingface.co/spaces/KevinAHM/pocket-tts-web">KevinAHM's web demo</a> (code Apache 2.0). Voices are only copied with permission, as Kyutai's terms require.
+    <a href="https://github.com/rhasspy/piper">Piper</a> voices (MIT) via <a href="https://github.com/Mintplex-Labs/piper-tts-web">piper-tts-web</a>.
+    <a href="https://github.com/hexgrad/kokoro">Kokoro</a> (Apache 2.0) via <a href="https://github.com/hexgrad/kokoro/tree/main/kokoro.js">kokoro-js</a>. Runtime: ONNX Runtime Web (MIT).</p>
+  </section>
+</main>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
