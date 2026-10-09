@@ -100,6 +100,10 @@
     <p class="muted tiny">Speaks one sentence again and again to see battery use, heat, and whether it slows down. Unplug first. Note the battery % shown below when it starts and ends.</p>
     <div class="row">
       <select id="loop-engine" aria-label="Voice for the 10 minute run"></select>
+      <select id="loop-pace" aria-label="How often to speak">
+        <option value="1.5">Non-stop (hardest test)</option>
+        <option value="20">A sentence every 20 seconds (like real use)</option>
+      </select>
       <button id="btn-loop">Start</button>
       <button id="btn-loop-stop" class="secondary" disabled>Stop</button>
     </div>

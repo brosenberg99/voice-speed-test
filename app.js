@@ -199,8 +199,12 @@ const piper = {
     this.voiceId = voiceId;
     await this.session.predict("Ready."); // first run warms everything up, so timings below are fair
   },
+  async ensureVoice(voice) { // the library keeps its first voice, so start a fresh session when the voice changes
+    if (voice === this.voiceId) return;
+    this.lib.TtsSession._instance = null;
+    await this.load(() => {}, voice);
+  },
   async run(text, voice, t0) {
-    if (voice !== this.voiceId) throw new Error("Press Download & load again after changing the voice.");
     const blob = await this.session.predict(text);
     const { samples, rate } = floatsFromWav(await blob.arrayBuffer());
     player.push(samples, rate);
@@ -338,6 +342,7 @@ async function loadEngine(e) {
 
 async function speakOnce(e, text, voice) {
   await player.ensure();
+  if (e.ensureVoice) await e.ensureVoice(voice); // before the timer starts: changing voice is not part of the speed
   player.reset();
   const t0 = performance.now();
   const r = await e.run(text, voice, t0);
@@ -417,6 +422,7 @@ const batText = (b) => (b ? `${b.pct}% (${b.charging ? "plugged in" : "on batter
 async function runLoop() {
   const e = engines.find((x) => x.id === $("#loop-engine").value);
   const text = SENTENCES[1].text;
+  const pace = Number($("#loop-pace").value);
   const status = $("#loop-status");
   loopStop = false;
   setBusy(true);
@@ -432,7 +438,7 @@ async function runLoop() {
       gaps += r.gaps || 0;
       const elapsed = (performance.now() - start) / 1000;
       status.textContent = `Running… ${Math.floor(elapsed / 60)}:${String(Math.floor(elapsed % 60)).padStart(2, "0")} of 10:00. ${times.length} sentences spoken. Battery at start: ${batText(b0)}.`;
-      await sleep(1500);
+      await sleep(pace * 1000);
     }
   } catch (err) {
     status.textContent = `Stopped: ${err.message}`;
@@ -445,7 +451,7 @@ async function runLoop() {
   const summary = `${fmt(mins, 1)} min, ${times.length} sentences, first sound avg ${fmt(mean(times))} s, worst ${fmt(Math.max(0, ...times))} s, first five avg ${fmt(mean(first))} s vs last five avg ${fmt(mean(last))} s, gaps ${gaps}. Battery ${batText(b0)} to ${batText(b1)}.`;
   status.textContent = `Finished. ${summary}`;
   status.className = "status ok";
-  loopSummaries.push(`${e.name} (${voiceOf(e)}): ${summary}`);
+  loopSummaries.push(`${e.name} (${voiceOf(e)}), a sentence every ${pace} s: ${summary}`);
   refreshOutput();
   $("#btn-loop-stop").disabled = true;
   setBusy(false);
@@ -457,10 +463,18 @@ async function deviceInfo() {
   const b = await battery();
   let storage = "n/a";
   try { const s = await navigator.storage.estimate(); storage = `${Math.round(s.usage / 1048576)} MB used of ${Math.round(s.quota / 1048576)} MB allowed`; } catch {}
+  let cpu = "n/a", brand = "n/a";
+  try {
+    const h = await navigator.userAgentData.getHighEntropyValues(["architecture", "bitness"]);
+    cpu = `${h.architecture || "?"} ${h.bitness || ""}-bit` + (h.architecture === "arm" ? " (native ARM, good)" : h.architecture === "x86" ? " (x86: on an ARM Surface this means it is running through emulation, which is slower)" : "");
+    brand = navigator.userAgentData.brands.map((b) => `${b.brand} ${b.version}`).join(", ");
+  } catch {}
   return [
     ["Date", new Date().toString()],
     ["Page", location.href],
-    ["Browser", navigator.userAgent],
+    ["Browser", brand],
+    ["Browser's processor type", cpu],
+    ["Browser (full text)", navigator.userAgent],
     ["Processor cores", navigator.hardwareConcurrency],
     ["Memory (browser's rounded figure, GB)", navigator.deviceMemory ?? "n/a"],
     ["Using all cores (isolated)", self.crossOriginIsolated ? "yes" : "NO: one core only, results will look slower than real"],
