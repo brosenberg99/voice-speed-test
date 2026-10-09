@@ -438,7 +438,7 @@ async function runLoop() {
       gaps += r.gaps || 0;
       const elapsed = (performance.now() - start) / 1000;
       status.textContent = `Running… ${Math.floor(elapsed / 60)}:${String(Math.floor(elapsed % 60)).padStart(2, "0")} of 10:00. ${times.length} sentences spoken. Battery at start: ${batText(b0)}.`;
-      await sleep(pace * 1000);
+      for (let waited = 0; waited < pace * 1000 && !loopStop && performance.now() - start < LOOP_MS; waited += 500) await sleep(500);
     }
   } catch (err) {
     status.textContent = `Stopped: ${err.message}`;
@@ -448,7 +448,8 @@ async function runLoop() {
   const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
   const first = times.slice(0, 5), last = times.slice(-5);
   const mins = (performance.now() - start) / 60000;
-  const summary = `${fmt(mins, 1)} min, ${times.length} sentences, first sound avg ${fmt(mean(times))} s, worst ${fmt(Math.max(0, ...times))} s, first five avg ${fmt(mean(first))} s vs last five avg ${fmt(mean(last))} s, gaps ${gaps}. Battery ${batText(b0)} to ${batText(b1)}.`;
+  const each = times.length <= 12 ? ` Each sentence's first sound (s): ${times.map((t) => fmt(t)).join(", ")}.` : ""; // few sentences: show them all, a trend needs more
+  const summary = `${fmt(mins, 1)} min, ${times.length} sentences, first sound avg ${fmt(mean(times))} s, worst ${fmt(Math.max(0, ...times))} s, first five avg ${fmt(mean(first))} s vs last five avg ${fmt(mean(last))} s, gaps ${gaps}.${each} Battery ${batText(b0)} to ${batText(b1)}.`;
   status.textContent = `Finished. ${summary}`;
   status.className = "status ok";
   loopSummaries.push(`${e.name} (${voiceOf(e)}), a sentence every ${pace} s: ${summary}`);
