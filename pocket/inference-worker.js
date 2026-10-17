@@ -16,7 +16,35 @@ const MODEL_STEMS = {
 const DEBUG_LOGS = false;
 const CHUNK_GAP_SEC = 0.25;
 const MAX_FRAMES = 500;
-const LSD_STEPS = 1;
+// Test-harness change: quality levers can be tried from the page address (?lsd=2&temp=0.5). Defaults are the original values.
+const _QUERY = new URL(self.location.href).searchParams;
+const LSD_STEPS = Math.max(1, Math.round(Number(_QUERY.get("lsd")) || 1));
+const TEMPERATURE = _QUERY.has("temp") ? Number(_QUERY.get("temp")) : 0.7;
+// Speed levers (same idea): ?ort=1.30.0 runtime version, ?threads=N, ?ctx=N starting attention-cache length
+// (the model ships with room for 1000 steps, copied in and out on every frame; it grows again if a chunk needs more),
+// ?seed=N repeatable noise so two settings can be compared sample for sample.
+const ORT_VERSION = _QUERY.get("ort") || "1.20.0";
+const THREADS = Number(_QUERY.get("threads")) || 0;
+const CACHE_LEN = Number(_QUERY.get("ctx")) || 0;
+const SEED = _QUERY.has("seed") ? Number(_QUERY.get("seed")) >>> 0 : null;
+const GROW_SLOTS = Number(_QUERY.get("grow")) || 32;
+// ?prec=main:w8,flow:fp32,dec:fp32 picks other precisions of a part: int8 (shipped default) "X_int8.onnx",
+// fp32 "X.onnx", w8 = weights-only 8-bit with full-precision maths "X_w8.onnx" (made from the fp32 file).
+const PRECISION = Object.fromEntries((_QUERY.get("prec") || "").split(",").filter(Boolean).map((p) => p.split(":")));
+const PRECISION_FILE = { int8: "_int8", fp32: "", w8: "_w8", h16: "_h16" }; // h16 = fp32 maths, weights stored as fp16 (half the download)
+const OTHER_PRECISION_BASE = (_QUERY.get("fp32base") || "").replace(/\/$/, ""); // hosted: fp32 files live in another repo
+const OTHER_PRECISION_FILES = new Set();
+for (const [part, stem] of [["main", "flow_lm_main"], ["flow", "flow_lm_flow"], ["dec", "mimi_decoder"]]) {
+    if (!(PRECISION[part] in PRECISION_FILE)) continue;
+    MODEL_STEMS[stem] = `${stem}${PRECISION_FILE[PRECISION[part]]}.onnx`;
+    if (PRECISION[part] !== "int8") OTHER_PRECISION_FILES.add(MODEL_STEMS[stem]);
+}
+const DECODE_FRAMES = Number(_QUERY.get("dec")) || 12; // frames per decoder call after the first (?dec=N)
+let random = Math.random;
+function seedRandom(seed) { // mulberry32
+    let a = seed >>> 0;
+    random = () => { a = (a + 0x6D2B79F5) >>> 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
 const RESET_FLOW_STATE_EACH_CHUNK = true;
 const RESET_MIMI_STATE_EACH_CHUNK = true;
 
@@ -57,6 +85,7 @@ function bundleDir(language) {
 }
 
 function bundlePath(language, filename) {
+    if (OTHER_PRECISION_BASE && OTHER_PRECISION_FILES.has(filename)) return `${OTHER_PRECISION_BASE}/${language}/${filename}`;
     return `${bundleDir(language)}/${filename}`;
 }
 
@@ -93,13 +122,49 @@ function createTensor(dtype, data, dims) {
 function initStateFromManifest(manifest) {
     const state = {};
     for (const entry of manifest) {
+        const shape = cacheShape(entry.shape);
         state[entry.input_name] = createTensor(
             entry.dtype,
-            makeFilledArray(entry.shape, entry.dtype, entry.fill),
-            entry.shape
+            makeFilledArray(shape, entry.dtype, entry.fill),
+            shape
         );
     }
     return state;
+}
+
+// [2, 1, 1000, 16, 64] attention caches start at CACHE_LEN instead of 1000 when ?ctx is set.
+function cacheShape(shape) {
+    return CACHE_LEN && shape.length === 5 && shape[2] === 1000 ? [shape[0], shape[1], CACHE_LEN, shape[3], shape[4]] : shape;
+}
+
+// The model reads the cache length from the tensor, but its file declares 1000 as fixed. Relabel that dimension as
+// free: each "dim_value 1000" (0A 03 08 E8 07) becomes "dim_param c" (0A 03 12 01 63), same length, weights untouched.
+function freeCacheLength(bytes) {
+    const out = new Uint8Array(bytes);
+    let n = 0;
+    for (let i = 0; i + 5 <= out.length; i++) {
+        if (out[i] === 0x0A && out[i + 1] === 0x03 && out[i + 2] === 0x08 && out[i + 3] === 0xE8 && out[i + 4] === 0x07) {
+            out[i + 2] = 0x12; out[i + 3] = 0x01; out[i + 4] = 0x63; n++; i += 4;
+        }
+    }
+    if (n !== 42 && n !== 12) throw new Error(`Unexpected model layout (${n} cache dims), load without ?ctx`); // int8 file / fp32 file
+    return out;
+}
+
+// Before a run would write past the end of the cache, copy it into a longer one (NaN = empty slot, as at start).
+function growCachesIfFull(state, adding) {
+    if (!CACHE_LEN) return;
+    const stepEntry = bundleMetadata.flow_lm_state_manifest.find((e) => e.key === "step");
+    const needed = Number(state[stepEntry.input_name].data[0]) + adding + 1;
+    for (const entry of bundleMetadata.flow_lm_state_manifest) {
+        const t = state[entry.input_name];
+        if (t.dims.length !== 5 || needed <= t.dims[2]) continue;
+        // grow in small steps: each step's cost rises with the cache length, so keep it just big enough (?grow=N slots)
+        const [a, b, len, h, d] = t.dims, block = len * h * d, bigger = Math.ceil((needed + GROW_SLOTS / 2) / GROW_SLOTS) * GROW_SLOTS;
+        const data = new Float32Array(a * b * bigger * h * d).fill(NaN);
+        for (let i = 0; i < a * b; i++) data.set(t.data.subarray(i * block, (i + 1) * block), i * bigger * h * d);
+        state[entry.input_name] = createTensor("float32", data, [a, b, bigger, h, d]);
+    }
 }
 
 function cloneState(state) {
@@ -229,8 +294,14 @@ function stateFromVoiceRecord(record) {
             continue;
         }
 
-        const data = adaptTypedArray(source, entry);
-        state[entry.input_name] = createTensor(entry.dtype, data, entry.shape);
+        // a built-in voice already fills 126-162 cache slots: start big enough to hold all of it
+        const shape = cacheShape(entry.shape);
+        if (CACHE_LEN && shape.length === 5 && source.shape.length === 5 && source.shape[2] + 1 > shape[2]) {
+            shape[2] = Math.ceil((source.shape[2] + 1 + GROW_SLOTS / 2) / GROW_SLOTS) * GROW_SLOTS;
+        }
+        const sized = { ...entry, shape };
+        const data = adaptTypedArray(source, sized);
+        state[entry.input_name] = createTensor(entry.dtype, data, sized.shape);
     }
 
     return state;
@@ -256,6 +327,7 @@ async function buildVoiceConditionedState(voiceEmb) {
     const flowLmState = initStateFromManifest(bundleMetadata.flow_lm_state_manifest);
     const emptySeq = createTensor("float32", new Float32Array(0), [1, 0, currentLatentDim]);
     const voiceTensor = prepareVoiceEmbeddingData(voiceEmb);
+    growCachesIfFull(flowLmState, voiceTensor.dims[1]);
 
     const result = await flowLmMainSession.run({
         sequence: emptySeq,
@@ -535,15 +607,16 @@ async function loadOrt() {
     }
 
     postMessage({ type: "status", status: "Loading ONNX Runtime...", state: "loading" });
-    const version = "1.20.0";
+    const version = ORT_VERSION;
     const cdnBase = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${version}/dist/`;
     const ortModule = await import(`https://cdn.jsdelivr.net/npm/onnxruntime-web@${version}/dist/ort.min.mjs`);
     ort = ortModule.default || ortModule;
     ort.env.wasm.wasmPaths = cdnBase;
     ort.env.wasm.simd = true;
     ort.env.wasm.numThreads = self.crossOriginIsolated
-        ? Math.min(navigator.hardwareConcurrency || 4, 8)
+        ? (THREADS || Math.min(navigator.hardwareConcurrency || 4, 8))
         : 1;
+    if (SEED !== null) seedRandom(SEED);
     precomputeFlowBuffers();
 }
 
@@ -596,7 +669,9 @@ async function loadBundle(language, { initialLoad = false } = {}) {
     const [encoderRes, textCondRes, flowMainRes, flowFlowRes, decoderRes] = await Promise.all([
         ort.InferenceSession.create(bundlePath(language, MODEL_STEMS.mimi_encoder), sessionOptions),
         ort.InferenceSession.create(bundlePath(language, MODEL_STEMS.text_conditioner), sessionOptions),
-        ort.InferenceSession.create(bundlePath(language, MODEL_STEMS.flow_lm_main), sessionOptions),
+        CACHE_LEN
+            ? fetch(bundlePath(language, MODEL_STEMS.flow_lm_main)).then((r) => r.arrayBuffer()).then((b) => ort.InferenceSession.create(freeCacheLength(b), sessionOptions))
+            : ort.InferenceSession.create(bundlePath(language, MODEL_STEMS.flow_lm_main), sessionOptions),
         ort.InferenceSession.create(bundlePath(language, MODEL_STEMS.flow_lm_flow), sessionOptions),
         ort.InferenceSession.create(bundlePath(language, MODEL_STEMS.mimi_decoder), sessionOptions),
     ]);
@@ -787,12 +862,13 @@ async function runGenerationPipeline(voiceName, chunks, framesAfterEos) {
     let flowLmState = cloneState(baseFlowState);
 
     const firstChunkFrames = 3;
-    const normalChunkFrames = 12;
+    const normalChunkFrames = DECODE_FRAMES;
     const allGeneratedLatents = [];
     let isFirstAudioChunk = true;
     let totalFlowLmTime = 0;
     let totalDecodeTime = 0;
     const generationStart = performance.now();
+    const prof = { text: 0, main: 0, flow: 0, dec: 0, steps: 0, firstAudio: null };
 
     for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
         if (!isGenerating) break;
@@ -813,10 +889,12 @@ async function runGenerationPipeline(voiceName, chunks, framesAfterEos) {
             [1, tokenIds.length]
         );
 
+        const textStart = performance.now();
         let textEmb = (await textConditionerSession.run({ token_ids: textInput }))[textConditionerSession.outputNames[0]];
         if (textEmb.dims.length === 2) {
             textEmb = createTensor("float32", new Float32Array(textEmb.data), [1, textEmb.dims[0], textEmb.dims[1]]);
         }
+        growCachesIfFull(flowLmState, textEmb.dims[1]);
 
         const condResult = await flowLmMainSession.run({
             sequence: emptySeq,
@@ -824,6 +902,7 @@ async function runGenerationPipeline(voiceName, chunks, framesAfterEos) {
             ...flowLmState,
         });
         updateStateFromManifestOutputs(flowLmState, condResult, bundleMetadata.flow_lm_state_manifest);
+        prof.text += performance.now() - textStart;
 
         const chunkLatents = [];
         let chunkDecodedFrames = 0;
@@ -838,6 +917,7 @@ async function runGenerationPipeline(voiceName, chunks, framesAfterEos) {
                 await new Promise((resolve) => setTimeout(resolve, 0));
             }
 
+            growCachesIfFull(flowLmState, 1);
             const stepStart = performance.now();
             const arResult = await flowLmMainSession.run({
                 sequence: currentLatent,
@@ -856,18 +936,21 @@ async function runGenerationPipeline(voiceName, chunks, framesAfterEos) {
             }
             const shouldStop = eosStep != null && step >= eosStep + framesAfterEos;
 
-            const temperature = 0.7;
+            const temperature = TEMPERATURE;
             const std = Math.sqrt(temperature);
             const latentData = new Float32Array(currentLatentDim);
             for (let i = 0; i < currentLatentDim; i++) {
                 let u = 0;
                 let v = 0;
-                while (u === 0) u = Math.random();
-                while (v === 0) v = Math.random();
+                while (u === 0) u = random();
+                while (v === 0) v = random();
                 latentData[i] = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v) * std;
             }
 
             const dt = 1.0 / LSD_STEPS;
+            const flowStart = performance.now();
+            prof.main += flowStart - stepStart;
+            prof.steps += 1;
             for (let lsdIndex = 0; lsdIndex < LSD_STEPS; lsdIndex++) {
                 const flowResult = await flowLmFlowSession.run({
                     c: conditioning,
@@ -880,6 +963,7 @@ async function runGenerationPipeline(voiceName, chunks, framesAfterEos) {
                     latentData[i] += flowDir[i] * dt;
                 }
             }
+            prof.flow += performance.now() - flowStart;
 
             chunkLatents.push(new Float32Array(latentData));
             allGeneratedLatents.push(new Float32Array(latentData));
@@ -910,6 +994,8 @@ async function runGenerationPipeline(voiceName, chunks, framesAfterEos) {
                 const decoderElapsed = performance.now() - decoderStart;
                 chunkGenTimeMs += decoderElapsed;
                 totalDecodeTime += decoderElapsed;
+                prof.dec += decoderElapsed;
+                if (prof.firstAudio === null) prof.firstAudio = performance.now() - generationStart;
 
                 for (const entry of bundleMetadata.mimi_state_manifest) {
                     mimiState[entry.input_name] = decodeResult[entry.output_name];
@@ -974,4 +1060,5 @@ async function runGenerationPipeline(voiceName, chunks, framesAfterEos) {
         state: "idle",
         metrics: { rtfx, genTime, totalTime, audioDuration: audioSeconds },
     });
+    postMessage({ type: "profile", profile: { ...prof, total: totalTime * 1000, audio: audioSeconds, threads: ort.env.wasm.numThreads, ort: ORT_VERSION, ctx: CACHE_LEN || 1000 } });
 }

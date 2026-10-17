@@ -23,6 +23,10 @@ only on localhost. Hosted, the page reads them from Hugging Face the first time 
   location from the page (`?base=`). Apache 2.0, see `LICENSE-pocket-web-demo-APACHE-2.0`.
 - Piper (`@mintplex-labs/piper-tts-web`) and Kokoro (`kokoro-js`) are loaded from jsDelivr.
 - All voices are played the same way: playback starts once 0.3 s of speech is ready, like Pocket's own demo.
+- Pocket settings: the page's preset picker sets these address settings (the worker reads them at load):
+  `ctx=64` starts the attention cache small and grows it (the model file reserves 1000 steps and copies them every frame;
+  same audio, about twice as fast), `threads=N`, `prec=main:fp32,...` other precisions (fp32 from KevinAHM/pocket-tts-onnx),
+  `ort=` runtime version, `seed=N` repeatable noise, `level=0` turns off per-voice levelling and the limiter, `lsd=`/`temp=`.
 - `?loopsec=20` shortens the "Repeat for 10 minutes" run, for checking the page only.
 
 ## Voices and consent

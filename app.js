@@ -11,8 +11,9 @@ const SENTENCES = [
 const LOOP_MS = (Number(params.get("loopsec")) || 600) * 1000; // 10 minutes; ?loopsec=20 is only for checking the page
 
 const LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname) && !params.get("remote");
-const POCKET_BASE = LOCAL ? "../models/pocket" : "https://huggingface.co/spaces/KevinAHM/pocket-tts-web/resolve/main/onnx";
-const ORT_DIST = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.0/dist/";
+const POCKET_BASE = LOCAL ? `../models/${params.get("models") || "pocket"}` :"https://huggingface.co/spaces/KevinAHM/pocket-tts-web/resolve/main/onnx";
+const POCKET_FP32_BASE = "https://huggingface.co/KevinAHM/pocket-tts-onnx/resolve/main/onnx"; // same export, full precision
+const ORT_DIST ="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.0/dist/";
 const PIPER_URL = "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts-web@1.0.5/dist/piper-tts-web.js";
 const KOKORO_URL = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/dist/kokoro.web.js";
 
@@ -130,13 +131,60 @@ engines.push({
   },
 });
 
+// Pocket's speed and sound settings: named presets so the tester picks one instead of editing the page address.
+// Each one only sets the worker's URL levers (see pocket/inference-worker.js); the page reloads to apply it.
+const POCKET_PRESETS = [
+  { id: "original", label: "Original (as in earlier tests)", params: {} },
+  { id: "fast", label: "Faster (same sound)", params: { ctx: "64" } },
+  { id: "cool", label: "Faster, lighter on battery (same sound)", params: { ctx: "64", threads: "4" } },
+  { id: "hub", label: "1 thread, like Benny's Hub (same sound)", params: { ctx: "64", threads: "1" } }, // the Hub page cannot use more
+];
+const PRESET_KEYS = ["ctx", "threads", "prec"];
+const currentPreset = () => POCKET_PRESETS.find((p) => PRESET_KEYS.every((k) => (p.params[k] || null) === params.get(k)));
+function describePocketSettings() {
+  const prec = params.get("prec") ? `precision ${params.get("prec")}` : "int8 (standard)";
+  const threads = params.get("threads") || `${Math.min(navigator.hardwareConcurrency || 4, 8)} (automatic)`;
+  const name = currentPreset()?.label || "custom (from the page address)";
+  return `${name}: cache ${params.get("ctx") ? `starts at ${params.get("ctx")}` : "1000"}, ${threads} thread${threads === "1" ? "" : "s"}, ${prec} models, levelling ${params.get("level") === "0" ? "off" : "on"}`;
+}
+
+// Words Pocket smears, spelled the way it says them clearly (like the Studio's say-list). Add to it as Ben finds more.
+// ("TV" -> "T V" was tried 2026-10-17: Bryan heard no improvement in a blind test.)
+const SAY_AS = [];
+const sayAs = (text) => SAY_AS.reduce((t, [from, to]) => t.replace(from, to), text);
+
+// Every voice is brought to about the same loudness (measured once per voice), and a soft limiter keeps peaks below
+// full scale so nothing clips. ?level=0 turns both off.
+const LEVEL = params.get("level") !== "0";
+const TARGET_DBFS = -18;
+function speechLevelDb(parts) { // loudness of the speech itself: 20 ms windows that are not near-silence
+  let sum = 0, n = 0;
+  for (const a of parts) {
+    for (let i = 0; i + 480 <= a.length; i += 480) {
+      let w = 0;
+      for (let j = i; j < i + 480; j++) w += a[j] * a[j];
+      if (w / 480 > 3e-5) { sum += w; n += 480; } // above about -45 dBFS
+    }
+  }
+  return n ? 10 * Math.log10(sum / n) : TARGET_DBFS;
+}
+function softLimit(a, gain) {
+  const knee = 0.9;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i] * gain, m = Math.abs(x);
+    a[i] = m <= knee ? x : Math.sign(x) * (knee + (1 - knee) * Math.tanh((m - knee) / (1 - knee)));
+  }
+}
+
 // Pocket TTS: copies a voice from a short clip. Runs in its own worker.
 const pocket = {
   id: "pocket", name: "Pocket TTS", blurb: "Can copy a custom voice from a short clip. About 200 MB.", needsDownload: true,
-  worker: null, voiceList: [], customReady: false, sampleRate: 24000, handlers: {},
+  worker: null, voiceList: [], customReady: false, sampleRate: 24000, handlers: {}, gain: {},
   voices() { return this.customReady ? ["custom", ...this.voiceList] : this.voiceList; },
   async load(setStatus) {
-    const url = `./pocket/inference-worker.js?base=${encodeURIComponent(POCKET_BASE)}`;
+    const extra = ["lsd", "temp", "ort", "threads", "ctx", "seed", "dec", "grow", "prec"].filter((k) => params.has(k)).map((k) => `&${k}=${encodeURIComponent(params.get(k))}`).join(""); // quality and speed levers, for experiments
+    const fp32 = LOCAL ? "" : `&fp32base=${encodeURIComponent(POCKET_FP32_BASE)}`;
+    const url = `./pocket/inference-worker.js?base=${encodeURIComponent(POCKET_BASE)}${extra}${fp32}`;
     this.worker = new Worker(url, { type: "module" });
     let loading = true; // the worker keeps sending status text later; only show it while loading
     await new Promise((resolve, reject) => {
@@ -146,6 +194,7 @@ const pocket = {
         if (m.type === "loaded") loading = false;
         if (m.type === "voices_loaded") this.voiceList = m.voices || [];
         if (m.type === "bundle_loaded" && m.sampleRate) this.sampleRate = m.sampleRate;
+        if (m.type === "profile") this.lastProfile = m.profile; // per-stage timings of the last sentence
         if (m.type === "loaded") resolve();
         if (m.type === "error") reject(new Error(m.error));
         this.handlers[m.type]?.(m);
@@ -166,20 +215,34 @@ const pocket = {
       this.worker.postMessage({ type: "encode_voice", data: { audio: samples24k } });
     });
     this.customReady = true;
+    delete this.gain.custom; // a new clip is measured again
   },
-  run(text, voice, t0) {
-    const FADE = 480;
+  // Before the timer starts (like Piper's voice switch): measure a new voice's loudness once. Doubles as a warm-up.
+  async ensureVoice(voice) {
+    if (!LEVEL || voice in this.gain) return;
+    const parts = await this.generate("Hello, I am ready to talk with you today.", voice, () => {});
+    const gain = 10 ** ((TARGET_DBFS - speechLevelDb(parts)) / 20);
+    this.gain[voice] = Number.isFinite(gain) ? Math.min(2.5, Math.max(0.25, gain)) : 1; // -12 dB to +8 dB
+  },
+  generate(text, voice, onChunk) {
+    const parts = [];
     return new Promise((resolve, reject) => {
-      this.handlers.audio_chunk = (m) => {
-        const a = m.data, k = m.metrics || {};
-        if (k.isFirst || k.chunkStart) for (let i = 0, n = Math.min(FADE, a.length); i < n; i++) a[i] *= i / n;
-        if (k.isLast) for (let i = 0, n = Math.min(FADE, a.length); i < n; i++) a[a.length - n + i] *= 1 - i / n;
-        player.push(a, this.sampleRate);
-      };
-      this.handlers.stream_ended = () => { this.handlers = {}; resolve({ made: (performance.now() - t0) / 1000 }); };
+      this.handlers.audio_chunk = (m) => { parts.push(m.data); onChunk(m); };
+      this.handlers.stream_ended = () => { this.handlers = {}; resolve(parts); };
       this.handlers.error = (m) => { this.handlers = {}; reject(new Error(m.error)); };
-      this.worker.postMessage({ type: "generate", data: { text, voice } });
+      this.worker.postMessage({ type: "generate", data: { text: sayAs(text), voice } });
     });
+  },
+  async run(text, voice, t0) {
+    const FADE = 480, gain = this.gain[voice] ?? 1;
+    await this.generate(text, voice, (m) => {
+      const a = m.data, k = m.metrics || {};
+      if (LEVEL) softLimit(a, gain);
+      if (k.isFirst || k.chunkStart) for (let i = 0, n = Math.min(FADE, a.length); i < n; i++) a[i] *= i / n;
+      if (k.isLast) for (let i = 0, n = Math.min(FADE, a.length); i < n; i++) a[a.length - n + i] *= 1 - i / n;
+      player.push(a, this.sampleRate);
+    });
+    return { made: (performance.now() - t0) / 1000 };
   },
 };
 engines.push(pocket);
@@ -480,6 +543,7 @@ async function deviceInfo() {
     ["Memory (browser's rounded figure, GB)", navigator.deviceMemory ?? "n/a"],
     ["Using all cores (isolated)", self.crossOriginIsolated ? "yes" : "NO: one core only, results will look slower than real"],
     ["Models from", LOCAL ? "this computer (local test)" : "the internet (then saved)"],
+    ["Pocket settings", describePocketSettings()],
     ["Online right now", navigator.onLine ? "yes" : "no (Wi-Fi off)"],
     ["Battery", batText(b)],
     ["Saved space", storage],
@@ -545,5 +609,13 @@ $("#btn-sample-voice").addEventListener("click", async () => {
   try { const res = await fetch(`./voices/sample-${key}.wav`); if (!res.ok) throw new Error(`HTTP ${res.status}`); await useVoiceClip(await res.arrayBuffer(), label); }
   catch (err) { $("#voice-status").textContent = `Could not load the sample voice: ${err.message}`; $("#voice-status").className = "status bad"; }
 });
-$("#voice-file").addEventListener("change", async (ev) => { const f = ev.target.files[0]; if (f) await useVoiceClip(await f.arrayBuffer(), f.name); });
+for (const p of POCKET_PRESETS) $("#pocket-preset").add(new Option(p.label, p.id));
+$("#pocket-preset").value = currentPreset()?.id || "original";
+$("#btn-preset").addEventListener("click", () => {
+  const next = new URLSearchParams(location.search);
+  for (const k of PRESET_KEYS) next.delete(k);
+  for (const [k, v] of Object.entries(POCKET_PRESETS.find((p) => p.id === $("#pocket-preset").value).params)) next.set(k, v);
+  location.search = next.toString();
+});
+$("#voice-file").addEventListener("change",async (ev) => { const f = ev.target.files[0]; if (f) await useVoiceClip(await f.arrayBuffer(), f.name); });
 window.__test = { engines, results, loaded, loadEngine, runThree, speakOnce, player, pocket, useVoiceClip }; // for automated checks
