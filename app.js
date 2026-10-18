@@ -202,9 +202,9 @@ const pocket = {
       this.worker.onerror = (e) => reject(new Error(e.message || "worker failed to start"));
       this.worker.postMessage({ type: "load" });
     });
-    // save the four sample voices too, so choosing one still works with Wi-Fi off
+    // save the sample and candidate voices too, so choosing one still works with Wi-Fi off
     setStatus("Saving the sample voices…");
-    await Promise.all(["a2", "a5", "b2", "b4"].map((k) => fetch(`./voices/sample-${k}.wav`).then((r) => r.arrayBuffer())));
+    await Promise.all([...document.querySelectorAll("#sample-voice option")].map((o) => fetch(voiceFile(o.value)).then((r) => r.arrayBuffer())));
   },
   async setCustomVoice(samples24k, setStatus, print = null) { // print: a Voice Studio export instead of a clip
     await new Promise((resolve, reject) => {
@@ -458,6 +458,8 @@ async function clipTo24k(arrayBuffer) {
   src.start();
   return (await off.startRendering()).getChannelData(0);
 }
+// The menu's voices: sample clips (encoded here) and candidate voice prints exported from Voice Studio.
+const voiceFile = (key) => (key.startsWith("candidate-") ? `./voices/${key}.pocketvoice.json` : `./voices/sample-${key}.wav`);
 // A Voice Studio export (.pocketvoice.json): Pocket's encoding of a voice, so the page needs neither the clip nor the encoder.
 function readVoicePrint(arrayBuffer) {
   const v = JSON.parse(new TextDecoder().decode(arrayBuffer));
@@ -467,13 +469,13 @@ function readVoicePrint(arrayBuffer) {
   if (data.length !== v.frames * v.dim) throw new Error("the voice file is incomplete");
   return { ...v, data };
 }
-async function useVoiceClip(arrayBuffer, label) {
+async function useVoiceClip(arrayBuffer, label, isPrint = /\.json$/i.test(label)) {
   setBusy(true);
   const status = $("#voice-status");
   try {
     status.textContent = "Preparing the custom voice…";
     const t0 = performance.now();
-    const print = /\.json$/i.test(label) ? readVoicePrint(arrayBuffer) : null;
+    const print = isPrint ? readVoicePrint(arrayBuffer) : null;
     await pocket.setCustomVoice(print ? null : await clipTo24k(arrayBuffer), (t) => (status.textContent = t), print && { data: print.data, frames: print.frames, dim: print.dim });
     fillVoices(pocket);
     const about = print ? ` “${print.name}”, made from ${print.made_from}.${print.made_from === "a recording" ? " " + print.permission : ""}` : "";
@@ -617,7 +619,7 @@ $("#btn-copy").addEventListener("click", copyResults);
 $("#btn-clear").addEventListener("click", clearDownloads);
 $("#btn-sample-voice").addEventListener("click", async () => {
   const key = $("#sample-voice").value, label = $("#sample-voice").selectedOptions[0].textContent;
-  try { const res = await fetch(`./voices/sample-${key}.wav`); if (!res.ok) throw new Error(`HTTP ${res.status}`); await useVoiceClip(await res.arrayBuffer(), label); }
+  try { const res = await fetch(voiceFile(key)); if (!res.ok) throw new Error(`HTTP ${res.status}`); await useVoiceClip(await res.arrayBuffer(), label, key.startsWith("candidate-")); }
   catch (err) { $("#voice-status").textContent = `Could not load the sample voice: ${err.message}`; $("#voice-status").className = "status bad"; }
 });
 for (const p of POCKET_PRESETS) $("#pocket-preset").add(new Option(p.label, p.id));

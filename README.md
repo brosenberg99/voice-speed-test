@@ -33,3 +33,6 @@ only on localhost. Hosted, the page reads them from Hugging Face the first time 
 
 Pocket TTS (Kyutai, CC BY 4.0) forbids copying a voice without the speaker's consent. `voices/sample-*.wav`
 are four voices invented from a written description in Voice Studio, not a recording of a person.
+`voices/candidate-*.pocketvoice.json` are six more, also designed from descriptions: lower, calmer voices that Pocket
+copied cleanly in blind listening tests, exported with Voice Studio's "Export for a low-power device" (voice prints, so
+the page needs no encoder for them). The custom voice picker takes any such export.
