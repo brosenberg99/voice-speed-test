@@ -206,13 +206,13 @@ const pocket = {
     setStatus("Saving the sample voices…");
     await Promise.all(["a2", "a5", "b2", "b4"].map((k) => fetch(`./voices/sample-${k}.wav`).then((r) => r.arrayBuffer())));
   },
-  async setCustomVoice(samples24k, setStatus) {
+  async setCustomVoice(samples24k, setStatus, print = null) { // print: a Voice Studio export instead of a clip
     await new Promise((resolve, reject) => {
       const done = () => { this.handlers = {}; };
       this.handlers.voice_encoded = () => { done(); resolve(); };
       this.handlers.error = (m) => { done(); reject(new Error(m.error)); };
       this.handlers.status = (m) => m.status && setStatus(m.status);
-      this.worker.postMessage({ type: "encode_voice", data: { audio: samples24k } });
+      this.worker.postMessage(print ? { type: "set_voice_print", data: print } : { type: "encode_voice", data: { audio: samples24k } });
     });
     this.customReady = true;
     delete this.gain.custom; // a new clip is measured again
@@ -458,18 +458,29 @@ async function clipTo24k(arrayBuffer) {
   src.start();
   return (await off.startRendering()).getChannelData(0);
 }
+// A Voice Studio export (.pocketvoice.json): Pocket's encoding of a voice, so the page needs neither the clip nor the encoder.
+function readVoicePrint(arrayBuffer) {
+  const v = JSON.parse(new TextDecoder().decode(arrayBuffer));
+  if (v.format !== "pocket-tts-voice-print" || v.version !== 1) throw new Error("this is not a Voice Studio voice file");
+  const bytes = Uint8Array.from(atob(v.data), (c) => c.charCodeAt(0));
+  const data = new Float32Array(bytes.buffer);
+  if (data.length !== v.frames * v.dim) throw new Error("the voice file is incomplete");
+  return { ...v, data };
+}
 async function useVoiceClip(arrayBuffer, label) {
   setBusy(true);
   const status = $("#voice-status");
   try {
     status.textContent = "Preparing the custom voice…";
     const t0 = performance.now();
-    await pocket.setCustomVoice(await clipTo24k(arrayBuffer), (t) => (status.textContent = t));
+    const print = /\.json$/i.test(label) ? readVoicePrint(arrayBuffer) : null;
+    await pocket.setCustomVoice(print ? null : await clipTo24k(arrayBuffer), (t) => (status.textContent = t), print && { data: print.data, frames: print.frames, dim: print.dim });
     fillVoices(pocket);
-    status.textContent = `Custom voice ready (${label}), prepared in ${fmt((performance.now() - t0) / 1000, 1)} s. Pocket TTS will now use it.`;
+    const about = print ? ` “${print.name}”, made from ${print.made_from}.${print.made_from === "a recording" ? " " + print.permission : ""}` : "";
+    status.textContent = `Custom voice ready (${label}), prepared in ${fmt((performance.now() - t0) / 1000, 1)} s. Pocket TTS will now use it.${about}`;
     status.className = "status ok";
   } catch (err) {
-    status.textContent = `Could not use that clip: ${err.message}`;
+    status.textContent = `Could not use that file: ${err.message}`;
     status.className = "status bad";
   }
   setBusy(false);

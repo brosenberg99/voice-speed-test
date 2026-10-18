@@ -80,7 +80,7 @@
 
   <section class="card" aria-labelledby="h-custom">
     <h2 id="h-custom">Pocket TTS: custom voice</h2>
-    <p class="muted tiny">Pocket TTS can copy the sound of a short voice clip (up to 10 seconds). Four invented sample voices came with this page, or pick a clip of your own. Only use voices you have permission to copy.</p>
+    <p class="muted tiny">Pocket TTS can copy the sound of a short voice clip (up to 10 seconds). Four invented sample voices came with this page, or pick a clip of your own, or a voice file exported from Voice Studio (.pocketvoice.json). Only use a real person's voice with their permission: your own voice, or recordings someone kept of their own voice to speak with after losing it, are exactly what this is for.</p>
     <div class="row">
       <label class="row" style="margin:0">Sample voice
         <select id="sample-voice" aria-label="Sample voice">
@@ -90,7 +90,7 @@
           <option value="b4">Bright, boyish voice 2 (B4)</option>
         </select></label>
       <button id="btn-sample-voice" class="secondary">Use this voice</button>
-      <label class="row" style="margin:0;font-weight:400">or a clip: <input type="file" id="voice-file" accept="audio/*"></label>
+      <label class="row" style="margin:0;font-weight:400">or a clip or Voice Studio voice file: <input type="file" id="voice-file" accept="audio/*,.json"></label>
     </div>
     <div class="status" id="voice-status" aria-live="polite">Using a built-in voice.</div>
   </section>

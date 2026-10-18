@@ -787,6 +787,20 @@ self.onmessage = async (e) => {
             return;
         }
 
+        if (type === "set_voice_print") { // Test-harness change: a Voice Studio export (frames x dim floats), no encoder needed
+            if (isGenerating) {
+                postMessage({ type: "error", error: "Cannot change the voice while generation is running." });
+                return;
+            }
+            if (data.dim !== currentConditioningDim) throw new Error(`This voice file is for a different model (${data.dim} values per frame).`);
+            customVoiceEmbedding = { data: data.data, shape: [1, data.frames, data.dim] };
+            currentVoiceName = "custom";
+            await ensureCustomVoiceCached({ force: true, statusText: "Preparing custom voice..." });
+            postMessage({ type: "voice_encoded", voiceName: "custom" });
+            postMessage({ type: "status", status: "Ready", state: "idle" });
+            return;
+        }
+
         if (type === "set_voice") {
             if (isGenerating) {
                 postMessage({ type: "error", error: "Cannot switch voice while generation is running." });
